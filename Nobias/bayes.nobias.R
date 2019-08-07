@@ -1,0 +1,313 @@
+
+setwd('/mnt/data8/xiaoxia/bayes_bulk/Nobias/')
+
+library(data.table)
+library(R2jags)
+library(dplyr)
+load('/mnt/raid61/Personal_data/tangchao/IR6/result/polyester_Simulation/chr1_depth_mat_and_BinExp_nobias.RData')
+
+excluded.genes <- unique(all_exp[all_exp$freq>2,]$gene_id) 
+expres.low <- all_exp[, sum(ExpSum),by=gene_id] %>% filter(V1 <1000)%>% pull(gene_id)
+excluded.genes <- unique(c(excluded.genes, expres.low),"ENSG00000251503.8_6")
+all_exp <- all_exp[!all_exp$gene_id%in%excluded.genes,]
+tmp <- all_exp[gene_id=="ENSG00000000457.14_4",]
+tmp[region=="ExonBin", NormExp:=round(ExpSum/width*mean(width))]
+setkey(tmp, start)
+head(tmp)
+
+
+bayes.mod.SJ<-function(){
+    for (j in 1:nB) {
+      p[j] <- Index[j,1]*theta + Index[j,2]*(1-theta)
+      N[j] ~ dpois(p[j]*W)
+     # N[j] ~ dbinom(p[j],W)#number of molecules we can observe
+
+    }
+                theta ~ dunif(0,1)#prior on theta
+
+}
+
+bayes.mod.params<-c("theta")
+bayes.mod.inits<-function(){
+        list(theta=runif(1,0,1))
+}
+posterior.iso1 <- list()
+for(g in unique(all_exp$gene_id)){
+  tmp <- all_exp[gene_id==g,]
+  tmp <- tmp[tmp$ExpSum!=0,]
+  setkey(tmp, start)
+  #only one isoform expressed, skip the model
+  if(!'SJ'%in%tmp$region){
+    posterior.iso1[[g]] <- data.frame(isoform=ifelse(nrow(tmp)==0,NA,unique(unlist(strsplit(tmp$tx_id,";|:")))[1]),
+                                      inferenced.psi=NA,gene.id =g )
+  }else{
+      if(length(unique(unlist(strsplit(tmp$tx_id,";|:"))))  ==1 ){
+      posterior.iso1[[g]] <- data.frame(isoform=unique(unlist(strsplit(tmp$tx_id,";|:"))),
+                                      inferenced.psi=1,gene.id =g )
+    }else{
+      index <- matrix(rep(0,2*nrow(tmp)),c(nrow(tmp),2))
+      iso1 <- unique(unlist(strsplit(tmp$tx_id,";|:")))[1]
+      iso2 <- unique(unlist(strsplit(tmp$tx_id,":|;")))[2]
+      index[grep(iso1, tmp$tx_id),1] <- 1
+      index[grep(iso2, tmp$tx_id),2] <- 1
+      index.SJ <- index[tmp$region == 'SJ',]######
+    if(is.null(nrow(index.SJ))){
+      index.SJ <- matrix(index.SJ, c(1,1))#sometimes there is only one bin
+    }
+      tmp.new <- tmp
+      tmp.new[tmp.new$region=='SJ',]$width <- 0
+      ln <- tmp.new$width
+      L1 <- sum(tmp.new[index[,1]==1,]$width)
+      L2 <- sum(tmp.new[index[,2]==1,]$width)
+      W1 <- mean(index[tmp$region == 'SJ',1]*tmp[tmp$region == 'SJ']$ExpSum)#
+      W2 <- mean(index[tmp$region == 'SJ',2]*tmp[tmp$region == 'SJ']$ExpSum)#
+      type <- tmp.new$region
+      type<-gsub('SJ','0',type)
+      type<-gsub('ExonBin','1',type)
+      type <- as.numeric(type)
+      N.SJ <- tmp[tmp$region =='SJ',]$ExpSum
+      
+      dat.jags.SJ <- list(Index=index.SJ, nB=nrow(index.SJ),
+                          nIso =2, N=N.SJ, 
+                          W = sum(W1+W2),L=ln,
+                          Le = sum(ln),
+                          L1=L2,L2=L2)
+      bayes.mod.fit.SJ <- jags(data = dat.jags.SJ,
+                              inits = bayes.mod.inits,
+                              parameters.to.save = bayes.mod.params,
+                              n.iter = 3000,
+                              n.chains = 1, 
+                              n.burnin = 1000,
+                              model.file = bayes.mod.SJ)
+      res <- bayes.mod.fit.SJ$BUGSoutput$mean$theta
+      posterior.iso1[[g]] <- data.frame(isoform=iso1,inferenced.psi=res,gene.id =g )
+    }
+  }
+}
+inferenced.psi.SJ <- do.call(rbind,posterior.iso1)
+
+
+bayes.mod.exon<-function(){
+    for (j in 1:nB) {
+      p[j] <- Index[j,1]*theta*L[j]/L1+Index[j,2]*(1-theta)*L[j]/L2
+      N[j] ~ dpois(p[j]*W)
+     # N[j] ~ dbinom(p[j],W)#number of molecules we can observe
+
+    }
+                theta ~ dunif(0,1)#prior on theta
+
+}
+bayes.mod.params<-c("theta")
+bayes.mod.inits<-function(){
+        list(theta=runif(1,0,1))
+}
+posterior.iso1 <- list()
+for(g in unique(all_exp$gene_id)){
+  tmp <- all_exp[gene_id==g,]
+  tmp <- tmp[tmp$ExpSum!=0,]
+  setkey(tmp, start)
+  if(!'ExonBin'%in%tmp$region){
+    posterior.iso1[[g]] <- data.frame(isoform=ifelse(nrow(tmp)==0,NA,unique(unlist(strsplit(tmp$tx_id,";|:")))[1]),
+                                      inferenced.psi=NA,gene.id =g )
+  }else{
+  #only one isoform expressed, skip the model
+    if(length(unique(unlist(strsplit(tmp$tx_id,";|:"))))  ==1 ){
+      posterior.iso1[[g]] <- data.frame(isoform=unique(unlist(strsplit(tmp$tx_id,";|:"))),
+                                        inferenced.psi=1,gene.id =g )
+    }else{
+    index <- matrix(rep(0,2*nrow(tmp)),c(nrow(tmp),2))
+    iso1 <- unique(unlist(strsplit(tmp$tx_id,";|:")))[1]
+    iso2 <- unique(unlist(strsplit(tmp$tx_id,":|;")))[2]
+    index[grep(iso1, tmp$tx_id),1] <- 1
+    index[grep(iso2, tmp$tx_id),2] <- 1
+    index.exon <- index[tmp$region == 'ExonBin',]######
+    if(is.null(nrow(index.exon))){
+      index.exon <- matrix(index.exon, c(1,1))#sometimes there is only one bin
+    }
+    tmp.new <- tmp
+    tmp.new[tmp.new$region=='SJ',]$width <- 0
+    L1 <- sum(tmp.new[index[,1]==1,]$width)
+    L2 <- sum(tmp.new[index[,2]==1,]$width)
+    W1 <- sum(index[,1]*tmp$ExpSum)
+    W2 <- sum(index[,2]*tmp$ExpSum)
+    type <- tmp.new$region
+    type<-gsub('SJ','0',type)
+    type<-gsub('ExonBin','1',type)
+    type <- as.numeric(type)
+    N.exon <- tmp[tmp$region =='ExonBin',]$ExpSum
+    ln <- tmp[tmp$region =='ExonBin',]$width
+    dat.jags.exon <- list(Index=index.exon, nB=nrow(index.exon),
+                          nIso =2, N=N.exon, 
+                          W = sum(tmp$ExpSum),L=ln,
+                          Le = sum(ln),L1=L1,L2=L2)
+    bayes.mod.fit.exon <- jags(data = dat.jags.exon,
+                              inits = bayes.mod.inits,
+                              parameters.to.save = bayes.mod.params,
+                              n.iter = 3000,
+                              n.chains = 1, 
+                              n.burnin = 1000,
+                              model.file = bayes.mod.exon)
+    res <- bayes.mod.fit.exon$BUGSoutput$mean$theta
+    posterior.iso1[[g]] <- data.frame(isoform=iso1,inferenced.psi=res,gene.id =g )
+    }
+  }
+}
+inferenced.psi.exon <- do.call(rbind,posterior.iso1)
+
+
+bayes.mod<-function(){
+    for (j in 1:nB) {
+      p[j] <- ifelse(type[j] == 1, Index[j,1]*theta*L[j]/L1+Index[j,2]*(1-theta)*L[j]/L2,
+                         Index[j,1]*theta + Index[j,2]*(1-theta))
+      w[j] <- ifelse(type[j] == 1, W, sum(W1+W2))
+      N[j] ~ dpois(p[j]*w[j])
+     # N[j] ~ dbinom(p[j],W)#number of molecules we can observe
+
+    }
+                theta ~ dunif(0,1)#prior on theta
+
+}
+bayes.mod.params<-c("theta")
+bayes.mod.inits<-function(){
+        list(theta=runif(1,0,1))
+}
+posterior.iso1 <- list()
+for(g in unique(all_exp$gene_id)){
+  tmp <- all_exp[gene_id==g,]
+  tmp <- tmp[tmp$ExpSum!=0,]
+  setkey(tmp, start)
+  if(nrow(tmp) == 0){
+    posterior.iso1[[g]] <- data.frame(isoform=ifelse(nrow(tmp)==0,NA,unique(unlist(strsplit(tmp$tx_id,";|:")))[1]),
+                                      inferenced.psi=NA,gene.id =g )
+  }else{
+  #only one isoform expressed, skip the model
+    if(length(unique(unlist(strsplit(tmp$tx_id,";|:"))))  ==1 ){
+      posterior.iso1[[g]] <- data.frame(isoform=unique(unlist(strsplit(tmp$tx_id,";|:"))),
+                                        inferenced.psi=1,gene.id =g )
+    }else{
+      iso1 <- unique(unlist(strsplit(tmp$tx_id,";|:")))[1]
+      iso2 <- unique(unlist(strsplit(tmp$tx_id,";|:")))[2]
+      index <- matrix(rep(0,nrow(tmp)*2),c(nrow(tmp),2))
+      index[grep(iso1, tmp$tx_id),1] <- 1 #index is 1 if isoform express this bin,otherwise 0
+      index[grep(iso2, tmp$tx_id),2] <- 1
+      tmp.new <- tmp
+      tmp.new[tmp.new$region=='SJ',]$width <- 0
+      ln <- tmp.new$width
+      L1 <- sum(tmp.new[index[,1]==1,]$width)
+      L2 <- sum(tmp.new[index[,2]==1,]$width)
+      W1 <- mean(index[tmp$region == 'SJ',1]*tmp[tmp$region == 'SJ']$ExpSum)#
+      W2 <- mean(index[tmp$region == 'SJ',2]*tmp[tmp$region == 'SJ']$ExpSum)#
+      type <- tmp.new$region
+      type<-gsub('SJ','0',type)
+      type<-gsub('ExonBin','1',type)
+      type <- as.numeric(type)
+      dat.jags <- list(Index=index, nB=nrow(tmp),
+                       N=tmp.new$ExpSum, 
+                       W = sum(tmp.new$ExpSum),
+                       L=ln,type=type,
+                       L1=L1,L2=L2,W1=W1,W2=W2)
+    bayes.mod.fit <- jags(data = dat.jags,
+                          inits = bayes.mod.inits,
+                          parameters.to.save = bayes.mod.params,
+                          n.iter = 3000,
+                          n.chains = 1, 
+                          n.burnin = 1000,
+                          model.file = bayes.mod)
+    res <- bayes.mod.fit$BUGSoutput$mean$theta
+    posterior.iso1[[g]] <- data.frame(isoform=iso1,inferenced.psi=res,gene.id =g )
+    }
+  }
+}
+inferenced.psi.both <- do.call(rbind,posterior.iso1)
+
+
+identical(inferenced.psi.SJ$gene.id,inferenced.psi.exon$gene.id)
+identical(inferenced.psi.SJ$gene.id,inferenced.psi.both$gene.id)
+inferenced.all <- data.frame(SJ = inferenced.psi.SJ$inferenced.psi,
+                             Exon = inferenced.psi.exon$inferenced.psi,
+                             both = inferenced.psi.both$inferenced.psi,
+                             gene.id = inferenced.psi.both$gene.id,
+                             isoform = inferenced.psi.both$isoform)
+inferenced.all <- inferenced.all[!is.na(inferenced.all$isoform),]
+saveRDS(inferenced.all, file = 'inferenced.all.rds')
+
+library(corrplot)
+test.data<- readRDS('inferenced.all.rds')
+true.psi <- as.data.frame(depth_mat[tx_id%in%as.character(test.data$isoform),])
+rownames(true.psi) <- true.psi$tx_id
+true.psi <- true.psi[as.character(test.data$isoform), ]
+identical(as.character(true.psi$tx_id),as.character(test.data$isoform))
+
+
+#calculate observed psi
+observed.psi.SJ <- c()
+for(g in test.data$gene.id){
+  iso <- test.data[test.data$gene.id == g, ]$isoform
+  tmp <- all_exp[all_exp$gene_id == g& region == 'SJ'&freq == 1,]
+  observed.psi.SJ[g] <- mean(tmp[tmp$tx_id == iso,]$ExpSum)/(mean(tmp[tmp$tx_id == iso,]$ExpSum)+mean(tmp[tmp$tx_id != iso,]$ExpSum))
+}
+
+observed.psi.exon <- c()
+for(g in test.data$gene.id){
+  iso <- test.data[test.data$gene.id == g, ]$isoform
+  tmp <- all_exp[all_exp$gene_id == g& region == 'ExonBin'&freq == 1,]
+  observed.psi.exon[g] <- mean(tmp[tmp$tx_id == iso,]$ExpSum/tmp[tmp$tx_id == iso,]$width)/(mean(tmp[tmp$tx_id == iso,]$ExpSum/tmp[tmp$tx_id == iso,]$width)+mean(tmp[tmp$tx_id != iso,]$ExpSum/tmp[tmp$tx_id != iso,]$width))
+}
+
+all.data <- test.data
+all.data$true.psi <- true.psi$PSI
+all.data$observed.psi.SJ <- observed.psi.SJ
+all.data$observed.psi.exon <- observed.psi.exon
+saveRDS(all.data, file = 'res.all.data.rds')
+
+all.data <- readRDS('res.all.data.rds')
+
+colnames(all.data)[1:3] <- c("inferenced.SJ","inferenced.exon","inferenced.both")
+all.data$observed.both.psi <- ifelse(!is.na(all.data$observed.psi.SJ),
+                                 all.data$observed.psi.SJ, all.data$observed.psi.exon)
+
+cor.res <- cor(all.data[!is.na(all.data$observed.both.psi),c(1,2,3,6,9)])
+MSE <- function(x,y){
+  df <- data.frame(x=x,y=y)
+  df <- na.omit(df)
+  mse <- round(mean((df$x-df$y)^2), 4)
+  return(mse)
+}
+
+COR <- function(x,y){
+  df <- data.frame(x=x,y=y)
+  df <- na.omit(df)
+  cor <- round(cor(df$x,df$y),4)
+  return(cor)
+}
+Plot <- function(x,y,label){
+  plot(x,y,main = paste0('MSE ', MSE(x,y),
+                         '\n', 'Number of genes ', length(x) -sum(is.na(y)),
+                         '\n', 'cor ', COR(x,y)),
+       xlab = "True.psi", ylab = label)
+}
+pdf('test.all.nobias.pdf')
+op <- par(mfrow = c(2, 3), pty = "s") 
+Plot(all.data$true.psi, all.data$inferenced.both, "Inferenced.Both")
+Plot(all.data$true.psi, all.data$inferenced.exon, "Inferenced.Exon")
+Plot(all.data$true.psi, all.data$inferenced.SJ, "Inferenced.SJ")
+Plot(all.data$true.psi, all.data$observed.both.psi, "Observed.Both")
+Plot(all.data$true.psi, all.data$observed.psi.exon, "Observed.Exon")
+Plot(all.data$true.psi, all.data$observed.psi.SJ, "Observed.SJ")
+par(op)
+dev.off()
+
+pdf('test.SJ.nobias.pdf')
+df <- all.data[!is.na(all.data$observed.psi.SJ),]
+op <- par(mfrow = c(2, 3), pty = "s") 
+Plot(df$true.psi, df$inferenced.both, "Inferenced.Both")
+Plot(df$true.psi, df$inferenced.exon, "Inferenced.Exon")
+Plot(df$true.psi, df$inferenced.SJ, "Inferenced.SJ")
+Plot(df$true.psi, df$observed.both.psi, "Observed.Both")
+Plot(df$true.psi, df$observed.psi.exon, "Observed.Exon")
+Plot(df$true.psi, df$observed.psi.SJ, "Observed.SJ")
+par(op)
+dev.off()
+
+
+

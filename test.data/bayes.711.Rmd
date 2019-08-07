@@ -1,0 +1,199 @@
+---
+title: "bayes711"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(R2jags)
+load('/mnt/raid61/Personal_data/tangchao/IR6/result/polyester_Simulation/chr1_depth_mat_and_BinExp.RData')
+tmp <- all_exp[gene_id=="ENSG00000000457.14_4",]
+tmp[region=="ExonBin", NormExp:=round(ExpSum/width*mean(width))]
+setkey(tmp, start)
+tmp[,c(7,10,12)]
+```
+
+```{r stan model,message=FALSE}
+library(rstan)
+# The Stan model as a string.
+model_string1 <- "
+// Here we define the data we are going to pass into the model
+data {
+int<lower=0> nB; // number of bins
+int<lower=1> nIso;  // number of isoforms
+int<lower=0> N[nB]; // number of reads in each bin
+vector[nB] L; //length of each bin
+matrix[nB,nIso] Index; // index is 1 if isoform i contains bin j and 0 otherwise.
+vector[nIso] type; //index is 1 if bin is exon and 0 if bin is SJ.
+real L1; //length of isoform1.
+real L2; // length of isoform2
+}
+
+transformed data{
+int W = sum(N); //total number of reads of gene
+}
+// Here we define what 'unknowns' aka parameters we have.
+parameters {
+real<lower=0, upper=1> theta[nIso]; //psi of each isoform
+}
+
+// The generative model
+model {
+vector[nB] p; //index of reads falling in the bin coming from isofroms
+//prior
+theta ~ uniform(0,1);
+  for(j in 1:nB){
+   p[j] = ifelse(type[j] == 1, Index[j,1]*theta*L[j]/L1+Index[j,2]*(1-theta)*L[j]/L2,
+                         Index[j,1]*theta/L1 + Index[j,2]*(1-theta)/L2)
+    N[j] ~ poisson(p[j]*W);
+    //N[j] ~ binomial(W,p[j]*L[j]);
+  }
+}
+
+"
+
+```
+
+```{r jags}
+
+bayes.mod<-function(){
+    for (j in 1:nB) {
+      p[j] <- ifelse(type[j] == 1, Index[j,1]*theta*L[j]/L1+Index[j,2]*(1-theta)*L[j]/L2,
+                         Index[j,1]*theta/L1 + Index[j,2]*(1-theta)/L2)
+      N[j] ~ dpois(p[j]*W)
+     # N[j] ~ dbinom(p[j],W)#number of molecules we can observe
+
+    }
+                theta ~ dunif(0,1)#prior on theta
+
+}
+
+bayes.mod2<-function(){
+    for (j in 1:nB) {
+      p[j] <- ifelse(type[j] == 1, Index[j,1]*theta*L[j]/L1+Index[j,2]*(1-theta)*L[j]/L2,
+                         Index[j,1]*theta/L1 + Index[j,2]*(1-theta)/L2)
+      W[j] <- sum(index[,1]*N[j])
+      N[j] ~ dpois(p[j]*W[j])
+     # N[j] ~ dbinom(p[j],W)#number of molecules we can observe
+
+    }
+                theta ~ dunif(0,1)#prior on theta
+
+}
+
+bayes.mod.params<-c("theta")
+bayes.mod.inits<-function(){
+        list(theta=runif(1,0,1))
+}
+index <- matrix(rep(0,60),c(30,2))
+index[grep('ENST00000367772.8_2', tmp$tx_id),1] <- 1
+index[grep('ENST00000367771.11_3', tmp$tx_id),2] <- 1
+tmp.new <- tmp
+tmp.new[tmp.new$region=='SJ',]$width <- 0
+ln <- tmp.new$width
+L1 <- sum(tmp.new[index[,1]==1,]$width)
+L2 <- sum(tmp.new[index[,2]==1,]$width)
+W1 <- sum(index[,1]*tmp$ExpSum)
+W2 <- sum(index[,2]*tmp$ExpSum)
+type <- tmp.new$region
+type<-gsub('SJ','0',type)
+type<-gsub('ExonBin','1',type)
+type <- as.numeric(type)
+dat.jags <- list(Index=index, nB=30,nIso =2, N=tmp.new$ExpSum, 
+                 W = sum(tmp.new$ExpSum),L=ln,
+                 type=type,
+                 Le = sum(ln),
+                 L1=L1,L2=L2)
+bayes.mod.fit <- jags(data = dat.jags,
+  inits = bayes.mod.inits,
+  parameters.to.save = bayes.mod.params,
+  n.iter = 2000,
+  n.chains = 1, 
+  n.burnin = 1000,
+  model.file = bayes.mod)
+bayes.mod.fit$BUGSoutput$mean$theta
+
+```
+
+
+
+```{r input data, eval=F}
+
+
+data_list = list(nB=30,nIso=2,N=tmp$ExpSum, L=tmp$width,Index = index)
+stan_samples <- stan(model_code = model_string1, data = dat.jags)
+hist(as.data.frame(stan_samples)[,1])
+```
+
+```{r, eval=F}
+posterior.iso1 <- list()
+for(g in unique(all_exp$gene_id)){
+  tmp <- all_exp[gene_id==g,]
+  tmp[region=="ExonBin", NormExp:=round(ExpSum/width*mean(width))]
+  setkey(tmp, start)
+  iso1 <- unique(unlist(strsplit(tmp$tx_id,"\\;")))[1]
+  iso2 <- unique(unlist(strsplit(tmp$tx_id,"\\;")))[2]
+  index <- matrix(rep(0,nrow(tmp)*2),c(nrow(tmp),2))
+  index[grep(iso1, tmp$tx_id),1] <- 1
+  index[grep(iso2, tmp$tx_id),2] <- 1
+  tmp.new <- tmp
+  tmp.new[tmp.new$region=='SJ',]$width <- 0
+  ln <- tmp.new$width
+  L1 <- sum(tmp.new[index[,1]==1,]$width)
+  L2 <- sum(tmp.new[index[,2]==1,]$width)
+  type <- tmp.new$region
+  type<-gsub('SJ','0',type)
+  type<-gsub('ExonBin','1',type)
+  type <- as.numeric(type)
+  dat.jags <- list(Index=index, nB=nrow(tmp),N=tmp.new$ExpSum, W = sum(tmp.new$ExpSum),L=ln,
+                 type=type,
+                 L1=L1,L2=L2)
+bayes.mod.fit <- jags(data = dat.jags,
+  inits = bayes.mod.inits,
+  parameters.to.save = bayes.mod.params,
+  n.iter = 3000,
+  n.chains = 1, 
+  n.burnin = 1000,
+  model.file = bayes.mod)
+bayes.mod.fit$BUGSoutput$mean$theta
+res <- bayes.mod.fit$BUGSoutput$mean$theta
+posterior.iso1[[g]] <- data.frame(isoform=iso1,psi.iso1=res,gene.id =g )
+}
+
+test.data <- do.call(rbind,posterior.iso1)
+saveRDS(test.data, file='/mnt/raid61/APA/Project/bayes_bulk/test.res.rds')
+```
+
+```{r}
+test.data<- readRDS('/mnt/raid61/APA/Project/bayes_bulk/test.res.rds')
+true.psi <- depth_mat[tx_id%in%test.data$isoform,]
+identical(as.character(true.psi$tx_id),as.character(test.data$isoform))
+plot(true.psi$PSI,test.data$psi.iso1)
+
+#calculate observed psi
+observed.psi <- c()
+for(g in test.data$gene.id){
+  iso <- test.data[test.data$gene.id == g, ]$isoform
+  tmp <- all_exp[all_exp$gene_id == g& region == 'SJ'&freq == 1,]
+  observed.psi[g] <- mean(tmp[tmp$tx_id == iso,]$ExpSum)/(mean(tmp[tmp$tx_id == iso,]$ExpSum)+mean(tmp[tmp$tx_id != iso,]$ExpSum))
+}
+
+all.psi <- test.data
+all.psi$observed.psi <- observed.psi
+all.psi$true.psi <- true.psi$PSI
+colnames(all.psi)[2] <- 'inferenced.psi'
+te <- na.omit(all.psi)
+mean((te$inferenced.psi - te$true.psi)^2)
+mean((te$observed.psi - te$true.psi)^2)
+#pdf('test.pdf')
+hist(all.psi$inferenced.psi)
+plot(all.psi$observed.psi,all.psi$true.psi)
+plot(all.psi$inferenced.psi,all.psi$observed.psi)
+plot(all.psi$inferenced.psi,all.psi$true.psi)
+#dev.off()
+```
+
